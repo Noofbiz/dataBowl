@@ -13,12 +13,38 @@ import (
 	"github.com/gomlx/gomlx/pkg/core/tensors"
 )
 
-// AnalyticsDataset
-// - Stores paths to CSV files with positional/time-series data
-// - Loads CSVs on-demand where examples are grouped by a play identifier
-// - If the CSVs are not in the file passed, download the data from kaggle.
-// - Each example is a time-ordered sequence of positions (x,y) and optionally other channels
-// - No labels are provided by default (exploratory / regression use)
+// AnalyticsDataset implements the gomlx train.Dataset interface for the data
+// for the analytics competition. It lazy loads data from CSV files matching a
+// pattern.
+type AnalyticsDataset struct {
+	// Pattern used to find CSV files
+	Pattern string
+
+	// List of CSV file paths matching the pattern
+	csvPaths []string
+
+	// Column to use for play ID grouping
+	playIDCol int
+
+	// Columns to extract for the sequence
+	seqCols     []int
+	seqColNames []string
+
+	// Random generator for shuffling
+	rand *rand.Rand
+
+	// Cache: map from file index to play IDs in that file
+	filePlayIDs map[int][]string
+
+	// Cache: map from play ID to (file index, row indices)
+	playLocations map[string]struct {
+		fileIdx int
+		rows    []int
+	}
+
+	// List of all unique play IDs
+	allPlayIDs []string
+}
 
 // NewAnalyticsDataset creates a new analytics dataset with lazy loading
 func NewAnalyticsDataset(pattern string, playIDCol string, seqColNames []string) (*AnalyticsDataset, error) {

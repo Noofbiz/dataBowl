@@ -13,11 +13,17 @@ import (
 	"github.com/gomlx/gomlx/pkg/core/tensors"
 )
 
-// PredictionDataset provides lazy-loaded access to CSV files containing
-// prediction examples.
+// PredictionDataset provides a gomlx train.Dataset interface that lazily
+// loads CSV files matching a given pattern for the prediction portion of the
+// competition.
+// Each CSV file is expected to have columns:
+// "x", "y", "s", "a", "o", "dir", "ball_land_x", "ball_land_y".
 type PredictionDataset struct {
 	// Pattern used to find CSV files (e.g., "assets/kaggle/*.csv")
 	Pattern string
+
+	// BatchSize for yielding batches
+	BatchSize int
 
 	// List of CSV file paths matching the pattern
 	csvPaths []string
@@ -38,38 +44,6 @@ type PredictionDataset struct {
 	totalExamples int
 }
 
-// AnalyticsDataset provides lazy-loaded access to CSV files containing
-// time-series analytics data.
-type AnalyticsDataset struct {
-	// Pattern used to find CSV files
-	Pattern string
-
-	// List of CSV file paths matching the pattern
-	csvPaths []string
-
-	// Column to use for play ID grouping
-	playIDCol int
-
-	// Columns to extract for the sequence
-	seqCols     []int
-	seqColNames []string
-
-	// Random generator for shuffling
-	rand *rand.Rand
-
-	// Cache: map from file index to play IDs in that file
-	filePlayIDs map[int][]string
-
-	// Cache: map from play ID to (file index, row indices)
-	playLocations map[string]struct {
-		fileIdx int
-		rows    []int
-	}
-
-	// List of all unique play IDs
-	allPlayIDs []string
-}
-
 // NewPredictionDataset creates a new prediction dataset that lazily loads
 // CSV files matching the given pattern.
 func NewPredictionDataset(pattern string) (*PredictionDataset, error) {
@@ -84,6 +58,7 @@ func NewPredictionDataset(pattern string) (*PredictionDataset, error) {
 
 	ds := &PredictionDataset{
 		Pattern:   pattern,
+		BatchSize: 32,
 		csvPaths:  csvPaths,
 		rand:      rand.New(rand.NewSource(time.Now().UnixNano())),
 		rowCounts: make(map[int]int),
@@ -171,7 +146,7 @@ func (d *PredictionDataset) Example(idx int) (inputs []float32, labels []float32
 // mapGlobalIndex maps a global index to (file index, row index within file)
 func (d *PredictionDataset) mapGlobalIndex(globalIdx int) (fileIdx, localIdx int) {
 	// Binary search for the file containing this index
-	for i := 0; i < len(d.csvPaths); i++ {
+	for i := range len(d.csvPaths) {
 		if globalIdx < d.cumCounts[i+1] {
 			return i, globalIdx - d.cumCounts[i]
 		}
@@ -196,7 +171,7 @@ func (d *PredictionDataset) readExample(fileIdx, rowIdx int) ([]float32, []float
 	}
 
 	// Skip to the desired row
-	for i := 0; i < rowIdx; i++ {
+	for range rowIdx {
 		if _, err := reader.Read(); err != nil {
 			return nil, nil, fmt.Errorf("failed to skip to row %d: %w", rowIdx, err)
 		}
@@ -332,6 +307,45 @@ func (d *PredictionDataset) Shuffle(seed int64) {
 	// For now, this is a placeholder - actual implementation would depend on requirements
 }
 
+// Tensors reads a batch of examples and returns them as gomlx tensors
+func (d *PredictionDataset) Tensors(indices []int) (inputs *tensors.Tensor, labels *tensors.Tensor, err error) {
+	inData, labData, err := d.Batch(indices)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	pbatch, err := MakePredictionBatchFlat(inData, labData)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return pbatch.ToGomlxTensors()
+}
+
+// Name returns the name of the dataset
+func (d *PredictionDataset) Name() string {
+	return "PredictionDataset"
+}
+
+// Yield returns the next batch of data for the gomlx Dataset interface. Batch
+// is determined by the BatchSize field.
+func (d *PredictionDataset) Yield() (spec any, inputs []*tensors.Tensor, labels []*tensors.Tensor, err error) {
+	indices := make([]int, d.BatchSize)
+	in, la, err := d.Tensors(indices)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	inputs = []*tensors.Tensor{in}
+	labels = []*tensors.Tensor{la}
+	return nil, inputs, labels, nil
+}
+
+// Restart resets the dataset for a new epoch
+func (d *PredictionDataset) Restart() error {
+	// For lazy loading, no internal state to reset
+	return nil
+}
+
 // PredictionBatchFlat stores a batch in flat contiguous buffers
 type PredictionBatchFlat struct {
 	Inputs    []float32
@@ -357,7 +371,7 @@ func MakePredictionBatchFlat(inputs, labels [][]float32) (*PredictionBatchFlat, 
 	flatInputs := make([]float32, batchSize*inputDim)
 	flatLabels := make([]float32, batchSize*labelDim)
 
-	for i := 0; i < batchSize; i++ {
+	for i := range batchSize {
 		if len(inputs[i]) != inputDim {
 			return nil, fmt.Errorf("inconsistent input dimensions at example %d: expected %d, got %d",
 				i, inputDim, len(inputs[i]))
@@ -392,7 +406,7 @@ func (b *PredictionBatchFlat) ToGomlxTensors() (*tensors.Tensor, *tensors.Tensor
 	// Reshape flat data into 2D slices
 	inputs := make([][]float32, b.BatchSize)
 	labels := make([][]float32, b.BatchSize)
-	for i := 0; i < b.BatchSize; i++ {
+	for i := range b.BatchSize {
 		inputs[i] = b.Inputs[i*b.InputDim : (i+1)*b.InputDim]
 		labels[i] = b.Labels[i*b.LabelDim : (i+1)*b.LabelDim]
 	}

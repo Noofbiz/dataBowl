@@ -1,5 +1,7 @@
 package datasets
 
+import "github.com/gomlx/gomlx/pkg/core/tensors"
+
 // This file provides two dataset implementations that load CSV data from the
 // kaggle assets and present them as examples suitable for model training.
 //
@@ -32,4 +34,7 @@ type Dataset interface {
 	Example(i int) (inputs []float32, labels []float32, err error)
 	Batch(indices []int) (inputs [][]float32, labels [][]float32, err error)
 	Shuffle(seed int64)
+
+	// To implement gomlx's train.Dataset interface
+	Yield() (any, []*tensors.Tensor, []*tensors.Tensor, error)
 }
