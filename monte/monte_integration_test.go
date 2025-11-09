@@ -25,7 +25,7 @@ func TestIntegrationWithPredictionDataset(t *testing.T) {
 	var predDS *datasets.PredictionDataset
 	var err error
 	for _, p := range patterns {
-		predDS, err = datasets.NewPredictionDataset(p)
+		predDS, err = datasets.NewPredictionDataset(p, "")
 		if err == nil {
 			t.Logf("Loaded prediction dataset using pattern: %s", p)
 			break
@@ -63,7 +63,8 @@ func TestIntegrationWithPredictionDataset(t *testing.T) {
 	const numSims = 50
 	const steps = 24
 
-	results, err := m.Simulate(inputs, numSims, steps)
+	// Pass the global example index (0) so Monte can fetch frame players for influence.
+	results, err := m.Simulate(0, inputs, numSims, steps)
 	if err != nil {
 		t.Fatalf("Simulate error: %v", err)
 	}

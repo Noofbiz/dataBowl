@@ -51,7 +51,7 @@ func TestModelTrainWithMockDataset(t *testing.T) {
 	const N = 120
 	inputs := make([][]float32, N)
 	labels := make([][]float32, N)
-	for i := range N {
+	for i := 0; i < N; i++ {
 		x := float32(i % 10)        // 0..9
 		y := float32((i / 10) % 10) // 0..9 repeated
 		in := make([]float32, 6)    // [x,y,s,a,o,dir]
@@ -156,7 +156,7 @@ func TestModelTrainWithRealPredictionDataset(t *testing.T) {
 	var predDS *datasets.PredictionDataset
 	var err error
 	for _, p := range patterns {
-		predDS, err = datasets.NewPredictionDataset(p)
+		predDS, err = datasets.NewPredictionDataset(p, "")
 		if err == nil {
 			t.Logf("loaded prediction dataset with pattern: %s", p)
 			break
@@ -177,7 +177,7 @@ func TestModelTrainWithRealPredictionDataset(t *testing.T) {
 	limit := min(128, total)
 
 	indices := make([]int, limit)
-	for i := range limit {
+	for i := 0; i < limit; i++ {
 		indices[i] = i
 	}
 
@@ -218,7 +218,7 @@ func TestModelTrainWithRealPredictionDataset(t *testing.T) {
 		if len(preds[i]) != 2 {
 			t.Fatalf("unexpected prediction dimension: got %d want 2", len(preds[i]))
 		}
-		for j := range 2 {
+		for j := 0; j < 2; j++ {
 			if math.IsNaN(float64(preds[i][j])) || math.IsInf(float64(preds[i][j]), 0) {
 				t.Fatalf("non-finite prediction at %d,%d: %v", i, j, preds[i][j])
 			}

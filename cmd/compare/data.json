@@ -1,0 +1,60 @@
+{
+  "monte": {
+    "k": 8,
+    "sims": 60,
+    "steps": 24,
+    "force_eps": 0.001,
+    "force_scale": 1.2,
+    "defense_weight": 1.0,
+    "role_targeted_weight": 2.0,
+    "role_passer_weight": 1.1,
+    "role_coverage_weight": 1.3,
+    "role_route_runner_weight": 1.15,
+    "max_per_player": 10.0,
+    "landing_nudge_factor": 0.02
+  },
+  "tunables": {
+    "precompute": {
+      "cache_path": "output/cache.gob",
+      "workers": 0,
+      "force": false,
+      "progress_interval_seconds": 3
+    },
+    "training": {
+      "optimizer": "adam",
+      "learning_rate": 0.005,
+      "epochs": 8,
+      "batch_size": 32,
+      "adam_beta1": 0.9,
+      "adam_beta2": 0.999,
+      "adam_eps": 1e-8,
+      "clip_norm": 5.0
+    },
+    "dataset_frame_index": {
+      "cache_ttl_seconds": 300,
+      "cache_max_entries": 2000
+    }
+  },
+   "categories": [
+     {
+       "category": "coverage",
+       "tokens": ["cb","corner","safety","db","coverage","zone","man","defense"],
+       "weight": 1.3
+     },
+     {
+       "category": "target",
+       "tokens": ["target","targeted","receiver","wr","te","slot"],
+       "weight": 2.0
+     },
+     {
+       "category": "pass",
+       "tokens": ["pass","passer","qb","quarterback"],
+       "weight": 1.1
+     },
+     {
+       "category": "route",
+       "tokens": ["route","route_runner","runner","slot","wr","te"],
+       "weight": 1.15
+     }
+   ]
+ }

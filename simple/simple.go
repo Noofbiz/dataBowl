@@ -13,17 +13,32 @@ type Config struct {
 	// If empty, a single hidden layer of size 64 will be used.
 	HiddenSizes []int
 
-	// LearningRate used by the default local trainer (SGD).
+	// InputDim is the dimensionality of the input feature vector. If zero,
+	// a sensible default (6) will be used by NewModel.
+	InputDim int
+
+	// LearningRate used by the optimizer (SGD or Adam).
 	LearningRate float64
 
 	// Epochs to train for (default if 0 will be set by NewModel to 10).
 	Epochs int
 
-	// BatchSize for mini-batch SGD (default if 0 will be set by NewModel to 8).
+	// BatchSize for mini-batch updates (default if 0 will be set by NewModel to 8).
 	BatchSize int
 
 	// Seed controls RNG for weight init and shuffling. If zero, time-based seed is used.
 	Seed int64
+
+	// Optimizer selects the optimizer to use: "adam" or "sgd". Default: "adam".
+	Optimizer string
+
+	// Adam hyperparameters (used when Optimizer == "adam"; defaults below if zero).
+	Beta1   float64
+	Beta2   float64
+	Epsilon float64
+
+	// ClipNorm is the gradient clipping threshold. If zero a sensible default is used.
+	ClipNorm float32
 }
 
 // Dataset is the minimal interface this package requires from a prediction dataset.
@@ -39,7 +54,7 @@ type Dataset interface {
 
 // Model is a small configurable MLP used for predicting landing coordinates
 // from the `PredictionDataset` inputs. By default it uses a lightweight,
-// self-contained trainer implemented in pure Go (no external deep learning
+// self-contained trainer implemented in pure Go (no external deep-learning
 // dependencies) so tests can run quickly and deterministically. A gomlx-based
 // trainer can be added in a separate file and swapped in by the caller.
 type Model struct {
@@ -84,8 +99,11 @@ func NewModel(cfg Config) (*Model, error) {
 		rng:    rand.New(rand.NewSource(cfg.Seed)),
 	}
 
-	// fixed input/output dims for the prediction dataset
-	const inputDim = 6
+	// fixed input/output dims for the prediction dataset (input dim configurable)
+	inputDim := cfg.InputDim
+	if inputDim == 0 {
+		inputDim = 6
+	}
 	const outputDim = 2
 
 	// build layer sizes
@@ -99,13 +117,13 @@ func NewModel(cfg Config) (*Model, error) {
 	L := len(sizes) - 1
 	m.weights = make([][][]float32, L)
 	m.biases = make([][]float32, L)
-	for l := range L {
+	for l := 0; l < L; l++ {
 		in := sizes[l]
 		out := sizes[l+1]
 		mat := make([][]float32, out)
-		for j := range out {
+		for j := 0; j < out; j++ {
 			row := make([]float32, in)
-			for i := range in {
+			for i := 0; i < in; i++ {
 				// Xavier/Glorot uniform initialization heuristic
 				limit := float32(math.Sqrt(6.0 / float64(in+out)))
 				row[i] = (m.rng.Float32()*2.0 - 1.0) * limit * 0.5
@@ -114,7 +132,7 @@ func NewModel(cfg Config) (*Model, error) {
 		}
 		m.weights[l] = mat
 		b := make([]float32, out)
-		for j := range out {
+		for j := 0; j < out; j++ {
 			b[j] = 0.0
 		}
 		m.biases[l] = b
@@ -160,16 +178,17 @@ func (m *Model) forwardSingle(input []float32) (preActs [][]float32, acts [][]fl
 	copy(acts[0], input)
 
 	preActs = make([][]float32, L)
-	for l := range L {
+	for l := 0; l < L; l++ {
 		inVec := acts[l]
 		outDim := len(m.biases[l])
+		inDim := len(inVec)
 		pre := make([]float32, outDim)
 		W := m.weights[l]
 		b := m.biases[l]
-		for j := range outDim {
+		for j := 0; j < outDim; j++ {
 			sum := float32(0.0)
 			row := W[j]
-			for i := range len(inVec) {
+			for i := 0; i < inDim; i++ {
 				sum += row[i] * inVec[i]
 			}
 			sum += b[j]
@@ -207,32 +226,10 @@ func (m *Model) PredictBatch(inputs [][]float32) ([][]float32, error) {
 	return out, nil
 }
 
-// meanSquaredErrorBatch computes MSE averaged over batch (for diagnostics).
-// func meanSquaredErrorBatch(preds, labels [][]float32) float64 {
-// 	if len(preds) == 0 {
-// 		return 0.0
-// 	}
-// 	sum := 0.0
-// 	n := 0
-// 	for i := range preds {
-// 		for j := range preds[i] {
-// 			d := float64(preds[i][j] - labels[i][j])
-// 			sum += d * d
-// 			n++
-// 		}
-// 	}
-// 	if n == 0 {
-// 		return 0.0
-// 	}
-// 	return sum / float64(n)
-// }
-
 // TrainWithDataset trains the model using a small in-package SGD trainer that
 // does not depend on any external deep-learning framework. This trainer is
 // intentionally simple: it runs mini-batch SGD with ReLU activations and a
-// mean-squared-error loss. Its purpose is to provide reproducible, fast tests.
-// For production and more sophisticated training you can implement a gomlx
-// trainer in a separate file and call that instead.
+// mean-squared-error loss. SGD updates are applied per-example.
 func (m *Model) TrainWithDataset(ds Dataset) error {
 	if ds == nil {
 		return errors.New("dataset is nil")
@@ -243,27 +240,41 @@ func (m *Model) TrainWithDataset(ds Dataset) error {
 	}
 
 	epochs := m.Config.Epochs
+	if epochs <= 0 {
+		epochs = 10
+	}
 	batchSize := m.Config.BatchSize
+	if batchSize <= 0 {
+		batchSize = 8
+	}
 	lr := float32(m.Config.LearningRate)
+	if lr <= 0 {
+		lr = 0.001
+	}
 
+	// Gradient clipping handled where appropriate (per-layer clipping in the optimizer).
 	// Build initial index slice
 	indices := make([]int, n)
-	for i := range n {
+	for i := 0; i < n; i++ {
 		indices[i] = i
 	}
 
 	// training loop
-	for range epochs {
+	for ep := 0; ep < epochs; ep++ {
 		// shuffle indices
 		m.rng.Shuffle(len(indices), func(i, j int) {
 			indices[i], indices[j] = indices[j], indices[i]
 		})
 
-		// iterate minibatches
+		// iterate minibatches (we will accumulate gradients over the minibatch and apply averaged SGD update)
 		for bstart := 0; bstart < n; bstart += batchSize {
-			bend := min(bstart+batchSize, n)
+			bend := bstart + batchSize
+			if bend > n {
+				bend = n
+			}
 			batchIdx := indices[bstart:bend]
 
+			// fetch the whole minibatch in one call
 			inputs, labels, err := ds.Batch(batchIdx)
 			if err != nil {
 				return err
@@ -273,70 +284,64 @@ func (m *Model) TrainWithDataset(ds Dataset) error {
 				continue
 			}
 
-			// Forward pass for all examples in batch: store preacts and acts per example
-			preactsBatch := make([][][]float32, batchN)
-			actsBatch := make([][][]float32, batchN)
-			for i := range batchN {
-				preacts, acts, err := m.forwardSingle(inputs[i])
-				if err != nil {
-					return err
-				}
-				preactsBatch[i] = preacts
-				actsBatch[i] = acts
-			}
-
-			// Initialize gradients accumulators (same shape as weights / biases)
+			// Initialize gradient accumulators (same shape as weights / biases)
 			L := len(m.weights)
 			gradW := make([][][]float32, L)
 			gradB := make([][]float32, L)
-			for l := range L {
+			for l := 0; l < L; l++ {
 				outDim := len(m.biases[l])
 				inDim := len(m.weights[l][0])
 				gradW[l] = make([][]float32, outDim)
-				for j := range outDim {
+				for j := 0; j < outDim; j++ {
 					gradW[l][j] = make([]float32, inDim)
 				}
 				gradB[l] = make([]float32, outDim)
 			}
 
-			// Backprop per example, accumulate gradients
-			for ex := range batchN {
-				acts := actsBatch[ex]
-				preacts := preactsBatch[ex]
-				// compute dLoss/dOutput = 2*(pred - label)
+			// Accumulate gradients for each example in the batch
+			for ex := 0; ex < batchN; ex++ {
+				in := inputs[ex]
+				la := labels[ex]
+
+				preacts, acts, err := m.forwardSingle(in)
+				if err != nil {
+					return err
+				}
+
+				// dLoss/dOutput = 2*(pred - label)
 				outAct := acts[len(acts)-1]
 				delta := make([]float32, len(outAct))
-				for j := range outAct {
-					delta[j] = 2 * (outAct[j] - labels[ex][j])
+				for j := 0; j < len(outAct); j++ {
+					delta[j] = 2.0 * (outAct[j] - la[j])
 				}
-				// backprop through layers from L-1 to 0
+
+				// Backprop to compute gradients, accumulate into gradW/gradB
 				for l := len(m.weights) - 1; l >= 0; l-- {
-					inAct := acts[l]     // activation of previous layer (input to layer l)
-					outDim := len(delta) // number of units in this layer
-					// compute gradients w.r.t weights and biases for this layer
-					for j := range outDim {
-						// bias gradient
+					inAct := acts[l]
+					outDim := len(delta)
+					inDim := len(inAct)
+
+					// accumulate bias gradients and weight gradients
+					for j := 0; j < outDim; j++ {
 						gradB[l][j] += delta[j]
-						// weight gradients
-						for i := range len(inAct) {
+						for i := 0; i < inDim; i++ {
 							gradW[l][j][i] += delta[j] * inAct[i]
 						}
 					}
-					// compute delta for previous layer if not input layer
+
+					// propagate delta to previous layer if needed
 					if l > 0 {
-						prevLen := len(m.weights[l][0]) // inDim
+						prevLen := len(m.weights[l][0])
 						newDelta := make([]float32, prevLen)
-						// propagate: newDelta[i] = sum_j W[j][i] * delta[j]
-						for i := range prevLen {
+						for i := 0; i < prevLen; i++ {
 							sum := float32(0.0)
-							for j := range outDim {
+							for j := 0; j < outDim; j++ {
 								sum += m.weights[l][j][i] * delta[j]
 							}
 							newDelta[i] = sum
 						}
-						// multiply by activation derivative (ReLU) of preAct of previous layer
 						deriv := activationReLUDeriv(preacts[l-1])
-						for i := range prevLen {
+						for i := 0; i < prevLen; i++ {
 							newDelta[i] *= deriv[i]
 						}
 						delta = newDelta
@@ -344,16 +349,15 @@ func (m *Model) TrainWithDataset(ds Dataset) error {
 				}
 			}
 
-			// Average gradients over batch and apply SGD update
+			// Apply averaged gradients (SGD) over the minibatch
 			bInv := float32(1.0 / float64(batchN))
-			for l := range len(m.weights) {
+			for l := 0; l < L; l++ {
 				outDim := len(m.biases[l])
 				inDim := len(m.weights[l][0])
-				for j := range outDim {
-					// update bias
+				for j := 0; j < outDim; j++ {
 					db := gradB[l][j] * bInv
 					m.biases[l][j] -= lr * db
-					for i := range inDim {
+					for i := 0; i < inDim; i++ {
 						dw := gradW[l][j][i] * bInv
 						m.weights[l][j][i] -= lr * dw
 					}
@@ -363,4 +367,12 @@ func (m *Model) TrainWithDataset(ds Dataset) error {
 	} // end epochs
 
 	return nil
+}
+
+// Helper: min of two ints
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

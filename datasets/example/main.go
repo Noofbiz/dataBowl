@@ -24,7 +24,7 @@ import (
 func main() {
 	// Prediction dataset: auto-discover CSV pattern and create lazy-loading dataset
 	predPattern := "../assets/kaggle/prediction/train/*.csv"
-	predDS, err := datasets.NewPredictionDataset(predPattern)
+	predDS, err := datasets.NewPredictionDataset(predPattern, "")
 	if err != nil {
 		log.Fatalf("failed to auto-load prediction dataset: %v", err)
 	}

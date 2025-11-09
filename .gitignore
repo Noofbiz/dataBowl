@@ -1,2 +1,6 @@
 # a bunch of big, boring csv files
 datasets/assets/
+
+# results
+cmd/compare/output/
+cmd/compare/plots/

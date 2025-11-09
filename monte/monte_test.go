@@ -4,6 +4,8 @@ import (
 	"math"
 	"math/rand"
 	"testing"
+
+	"github.com/Noofbiz/dataBowl/datasets"
 )
 
 // mockDS is a small in-memory dataset implementing the Dataset interface used by Monte.
@@ -19,6 +21,14 @@ func (m *mockDS) Example(i int) ([]float32, []float32, error) {
 		return nil, nil, nil
 	}
 	return m.inputs[i], m.labels[i], nil
+}
+
+// FramePlayersForExample implements the new dataset method Monte expects.
+// For tests we return an empty slice (no additional players). This keeps the
+// behavior equivalent to previous tests while satisfying the interface.
+func (m *mockDS) FramePlayersForExample(globalIdx int) ([]datasets.FramePlayer, error) {
+	// No per-frame players for the simple mock dataset used in unit tests.
+	return []datasets.FramePlayer{}, nil
 }
 
 func approxEqual(a, b, tol float64) bool {
@@ -49,7 +59,7 @@ func TestSimulateReturnsTrajectories(t *testing.T) {
 
 	numSims := 10
 	steps := 6
-	results, err := m.Simulate(initial, numSims, steps)
+	results, err := m.Simulate(0, initial, numSims, steps)
 	if err != nil {
 		t.Fatalf("Simulate returned error: %v", err)
 	}
@@ -111,7 +121,7 @@ func TestSimulateK1Deterministic(t *testing.T) {
 
 	numSims := 5
 	steps := 4
-	results, err := m.Simulate(initial, numSims, steps)
+	results, err := m.Simulate(0, initial, numSims, steps)
 	if err != nil {
 		t.Fatalf("Simulate returned error: %v", err)
 	}

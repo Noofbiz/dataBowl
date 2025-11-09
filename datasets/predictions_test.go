@@ -52,7 +52,7 @@ func TestPredictionDataset_LoadAndRead(t *testing.T) {
 	writeCSV(t, file2, header, rows2)
 
 	pattern := filepath.Join(tmp, "*.csv")
-	ds, err := NewPredictionDataset(pattern)
+	ds, err := NewPredictionDataset(pattern, "")
 	if err != nil {
 		t.Fatalf("NewPredictionDataset failed: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestPredictionDataset_MissingColumns(t *testing.T) {
 	writeCSV(t, file, header, rows)
 
 	pattern := filepath.Join(tmp, "*.csv")
-	_, err := NewPredictionDataset(pattern)
+	_, err := NewPredictionDataset(pattern, "")
 	if err == nil {
 		t.Fatalf("expected error when required columns missing, got nil")
 	}
