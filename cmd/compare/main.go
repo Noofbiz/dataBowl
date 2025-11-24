@@ -1119,6 +1119,8 @@ func main() {
 		var sumSqModel float64
 		var sumSqMonte float64
 		valid := 0
+		// keep a separate counter for Monte samples that were actually valid
+		monteValid := 0
 
 		for i := 0; i < evalCount; i++ {
 			// Fetch next-frame ground truth for this example (skip if absent)
@@ -1154,6 +1156,41 @@ func main() {
 			mp := mpreds[0]
 			modelErr := math.Hypot(float64(mp[0]-nx), float64(mp[1]-ny))
 
+			// If model produced a non-finite error (NaN/Inf), skip counting this example
+			if math.IsNaN(modelErr) || math.IsInf(modelErr, 0) {
+				// still attempt to get Monte stats for the row to log, but do not include in RMSE accumulators
+				monteMeanX, monteMeanY, merr := monteSim.PredictNextFrame(i, baseInp, *monteSims)
+				monteSamples := *monteSims
+				monteErr := math.NaN()
+				if merr == nil {
+					monteErr = math.Hypot(monteMeanX-float64(nx), monteMeanY-float64(ny))
+				} else {
+					monteMeanX = math.NaN()
+					monteMeanY = math.NaN()
+					monteErr = math.NaN()
+					monteSamples = 0
+				}
+				if monteSamples > 0 && !math.IsNaN(monteErr) {
+					sumSqMonte += monteErr * monteErr
+					monteValid++
+				}
+				row := []string{
+					strconv.Itoa(i),
+					strconv.FormatFloat(float64(nx), 'f', 6, 64),
+					strconv.FormatFloat(float64(ny), 'f', 6, 64),
+					strconv.FormatFloat(float64(mp[0]), 'f', 6, 64),
+					strconv.FormatFloat(float64(mp[1]), 'f', 6, 64),
+					strconv.FormatFloat(math.NaN(), 'f', 6, 64),
+					strconv.FormatFloat(monteMeanX, 'f', 6, 64),
+					strconv.FormatFloat(monteMeanY, 'f', 6, 64),
+					strconv.FormatFloat(monteErr, 'f', 6, 64),
+					strconv.Itoa(monteSamples),
+				}
+				_ = w.Write(row)
+				// skip incrementing valid/model accumulators
+				continue
+			}
+
 			// Monte next-frame prediction (uses neighbor-based empirical next-frame lookups)
 			monteMeanX, monteMeanY, merr := monteSim.PredictNextFrame(i, baseInp, *monteSims)
 			monteSamples := *monteSims
@@ -1168,10 +1205,11 @@ func main() {
 				monteSamples = 0
 			}
 
-			// accumulate RMSE sums for valid comparisons (model always considered valid here)
+			// accumulate RMSE sums for valid comparisons
 			sumSqModel += modelErr * modelErr
 			if monteSamples > 0 && !math.IsNaN(monteErr) {
 				sumSqMonte += monteErr * monteErr
+				monteValid++
 			}
 			valid++
 
@@ -1197,12 +1235,12 @@ func main() {
 			log.Printf("No valid examples found for forecast evaluation")
 		} else {
 			rmseModel := math.Sqrt(sumSqModel / float64(valid))
-			// Monte RMSE only meaningful if we had valid samples; if none, report NaN
+			// Monte RMSE only meaningful if we had valid monte samples; if none, report NaN
 			var rmseMonte float64
-			if sumSqMonte == 0 {
+			if monteValid == 0 {
 				rmseMonte = math.NaN()
 			} else {
-				rmseMonte = math.Sqrt(sumSqMonte / float64(valid))
+				rmseMonte = math.Sqrt(sumSqMonte / float64(monteValid))
 			}
 			fmt.Printf("Forecast evaluation over %d examples: RMSE Model = %f, RMSE Monte(mean) = %f\n", valid, rmseModel, rmseMonte)
 		}
