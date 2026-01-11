@@ -41,6 +41,221 @@ var (
 	precomputeProgressIntervalSeconds = 3
 )
 
+// plotMonteTrajectories plots simulated trajectories and actual landings for several examples.
+func plotMonteTrajectories(
+	monteSim *monte.Monte,
+	ds datasets.PredictionDataset,
+	exampleIndices []int,
+	numSims int,
+	steps int,
+	outDir string,
+) error {
+	if err := ensureDir(outDir); err != nil {
+		return err
+	}
+	for _, idx := range exampleIndices {
+		inputs, labels, err := ds.Example(idx)
+		if err != nil || len(inputs) < 6 || len(labels) < 2 {
+			continue
+		}
+		results, err := monteSim.Simulate(idx, inputs, numSims, steps)
+		if err != nil || len(results) == 0 {
+			continue
+		}
+		// Prepare plot
+		p := plot.New()
+		p.Title.Text = fmt.Sprintf("Monte Carlo Trajectories (Example %d)", idx)
+		p.X.Label.Text = "x"
+		p.Y.Label.Text = "y"
+
+		// Plot all simulated trajectories
+		for i, r := range results {
+			xys := make(plotter.XYs, len(r.Trajectory))
+			for j, pt := range r.Trajectory {
+				xys[j].X = float64(pt.X)
+				xys[j].Y = float64(pt.Y)
+			}
+			line, err := plotter.NewLine(xys)
+			if err != nil {
+				return err
+			}
+			col := color.RGBA{R: 40, G: 120, B: 40, A: uint8(60 + (i%3)*40)}
+			line.Color = col
+			line.Width = vg.Points(0.7)
+			p.Add(line)
+			if i == 0 {
+				p.Legend.Add("simulated trajectories", line)
+			}
+		}
+
+		// Plot actual landing point
+		gt := make(plotter.XYs, 1)
+		gt[0].X = float64(labels[0])
+		gt[0].Y = float64(labels[1])
+		sc, err := plotter.NewScatter(gt)
+		if err != nil {
+			return err
+		}
+		sc.GlyphStyle.Color = color.RGBA{R: 200, G: 30, B: 30, A: 220}
+		sc.GlyphStyle.Radius = vg.Points(3.5)
+		p.Add(sc)
+		p.Legend.Add("actual landing", sc)
+
+		// Plot starting point
+		start := make(plotter.XYs, 1)
+		start[0].X = float64(inputs[0])
+		start[0].Y = float64(inputs[1])
+		scStart, err := plotter.NewScatter(start)
+		if err != nil {
+			return err
+		}
+		scStart.GlyphStyle.Color = color.RGBA{R: 30, G: 30, B: 200, A: 220}
+		scStart.GlyphStyle.Radius = vg.Points(3.0)
+		p.Add(scStart)
+		p.Legend.Add("start", scStart)
+
+		if fps, err := ds.FramePlayersForExample(idx); err == nil && len(fps) > 0 {
+			playerPts := make(plotter.XYs, len(fps))
+			for i, fp := range fps {
+				playerPts[i].X = float64(fp.X)
+				playerPts[i].Y = float64(fp.Y)
+			}
+			scPlayers, err := plotter.NewScatter(playerPts)
+			if err == nil {
+				scPlayers.GlyphStyle.Color = color.RGBA{R: 120, G: 120, B: 120, A: 120}
+				scPlayers.GlyphStyle.Radius = vg.Points(1.5)
+				p.Add(scPlayers)
+				p.Legend.Add("players", scPlayers)
+			}
+		}
+
+		// Auto-range
+		xmin, xmax, ymin, ymax := autoRange(nil)
+		p.X.Min = xmin
+		p.X.Max = xmax
+		p.Y.Min = ymin
+		p.Y.Max = ymax
+
+		outPath := filepath.Join(outDir, fmt.Sprintf("monte_trajectories_example_%d.png", idx))
+		if err := p.Save(7*vg.Inch, 6*vg.Inch, outPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+
+// plotParameterTuningResults plots RMSE vs. each parameter from parameter tuning results.
+func plotParameterTuningResults(results []struct {
+	ForceScale    float64
+	DefenseWeight float64
+	MaxPerPlayer  float64
+	RoleTargeted  float64
+	RolePasser    float64
+	RMSE          float64
+}, outDir string) error {
+	params := []struct {
+		name  string
+		get   func(r struct {
+			ForceScale    float64
+			DefenseWeight float64
+			MaxPerPlayer  float64
+			RoleTargeted  float64
+			RolePasser    float64
+			RMSE          float64
+		}) float64
+	}{
+		{"ForceScale", func(r struct {
+			ForceScale    float64
+			DefenseWeight float64
+			MaxPerPlayer  float64
+			RoleTargeted  float64
+			RolePasser    float64
+			RMSE          float64
+		}) float64 { return r.ForceScale }},
+		{"DefenseWeight", func(r struct {
+			ForceScale    float64
+			DefenseWeight float64
+			MaxPerPlayer  float64
+			RoleTargeted  float64
+			RolePasser    float64
+			RMSE          float64
+		}) float64 { return r.DefenseWeight }},
+		{"MaxPerPlayer", func(r struct {
+			ForceScale    float64
+			DefenseWeight float64
+			MaxPerPlayer  float64
+			RoleTargeted  float64
+			RolePasser    float64
+			RMSE          float64
+		}) float64 { return r.MaxPerPlayer }},
+		{"RoleTargeted", func(r struct {
+			ForceScale    float64
+			DefenseWeight float64
+			MaxPerPlayer  float64
+			RoleTargeted  float64
+			RolePasser    float64
+			RMSE          float64
+		}) float64 { return r.RoleTargeted }},
+		{"RolePasser", func(r struct {
+			ForceScale    float64
+			DefenseWeight float64
+			MaxPerPlayer  float64
+			RoleTargeted  float64
+			RolePasser    float64
+			RMSE          float64
+		}) float64 { return r.RolePasser }},
+	}
+
+	if err := ensureDir(outDir); err != nil {
+		return err
+	}
+
+	for _, param := range params {
+		pts := make(plotter.XYs, len(results))
+		for i, r := range results {
+			pts[i].X = param.get(r)
+			pts[i].Y = r.RMSE
+		}
+
+		p := plot.New()
+		p.Title.Text = fmt.Sprintf("RMSE vs. %s", param.name)
+		p.X.Label.Text = param.name
+		p.Y.Label.Text = "RMSE"
+
+		sc, err := plotter.NewScatter(pts)
+		if err != nil {
+			return err
+		}
+		sc.GlyphStyle.Color = color.RGBA{R: 30, G: 30, B: 180, A: 180}
+		sc.GlyphStyle.Radius = vg.Points(2.2)
+		p.Add(sc)
+
+		// Optionally add a line for the minimum RMSE
+		minRMSE := math.Inf(1)
+		for _, pt := range pts {
+			if pt.Y < minRMSE {
+				minRMSE = pt.Y
+			}
+		}
+
+		rmseFunc := func(x float64) float64 {
+			return minRMSE
+		}
+		if line := plotter.NewFunction(rmseFunc); line != nil {
+			line.Color = color.RGBA{R: 200, G: 30, B: 30, A: 120}
+			line.Width = vg.Points(1)
+			p.Add(line)
+		}
+
+		outPath := filepath.Join(outDir, fmt.Sprintf("param_tuning_%s.png", strings.ToLower(param.name)))
+		if err := p.Save(6*vg.Inch, 4*vg.Inch, outPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // defaultRoleConfigJSON is the embedded JSON used to create cmd/compare/data.json
 // when the user did not provide a --monte-role-config path. We write this file as
 // a convenience so the default configuration is available on disk; however when
@@ -639,6 +854,38 @@ func main() {
 			log.Printf("Loaded monte role config from %s", defaultPath)
 		}
 		effectiveRoleConfigPath = defaultPath
+	}
+
+	// --- Automated Monte Carlo Parameter Tuning ---
+	// Example: Tune parameters using the first 100 examples in the dataset
+	if monteSim.DS != nil && monteSim.DS.Len() > 100 {
+		exampleIndices := make([]int, 100)
+		for i := 0; i < 100; i++ {
+			exampleIndices[i] = i
+		}
+		numSims := 30    // Number of Monte Carlo draws per example
+		steps := 24      // Number of steps per trajectory
+		numTrials := 100 // Number of random parameter sets to try
+
+		fmt.Println("Starting automated Monte Carlo parameter tuning...")
+		tuningResults := monteSim.TuneParameters(exampleIndices, numSims, steps, numTrials)
+		fmt.Println("Parameter tuning complete.")
+
+		// Plot parameter tuning results
+		if err := plotParameterTuningResults(tuningResults, "output"); err != nil {
+			log.Printf("Failed to plot parameter tuning results: %v", err)
+		} else {
+			fmt.Println("Parameter tuning plots saved to output/")
+		}
+
+		// Plot Monte Carlo trajectories for several examples
+		exIdxs := []int{0, 1, 2, 3, 4}
+		fmt.Println("Plotting Monte Carlo trajectories for several examples...")
+		if err := plotMonteTrajectories(monteSim, *predDS, exIdxs, numSims, steps, "plots"); err != nil {
+			log.Printf("Failed to plot Monte Carlo trajectories: %v", err)
+		} else {
+			fmt.Println("Monte Carlo trajectory plots saved to output/")
+		}
 	}
 
 	// Try to read additional tunables from the same JSON file (if it exists).

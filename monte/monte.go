@@ -387,8 +387,6 @@ func (m *Monte) Simulate(globalIdx int, initial []float32, numSims, steps int) (
 	}
 
 	// Fetch frame players once for this global example index (if supported by the dataset).
-	// Use a type assertion so Monte can work with datasets that do or do not implement
-	// FramePlayersForExample.
 	var players []datasets.FramePlayer
 	if provider, ok := m.DS.(interface {
 		FramePlayersForExample(int) ([]datasets.FramePlayer, error)
@@ -396,7 +394,6 @@ func (m *Monte) Simulate(globalIdx int, initial []float32, numSims, steps int) (
 		if fps, err := provider.FramePlayersForExample(globalIdx); err == nil {
 			players = fps
 		} else {
-			// If fetching players fails, proceed without player influence.
 			players = nil
 		}
 	} else {
@@ -424,8 +421,21 @@ func (m *Monte) Simulate(globalIdx int, initial []float32, numSims, steps int) (
 		totalWeight += w
 	}
 
-	// Simulation-level tuning constants: take from Monte tunables, falling back
-	// to sensible defaults if a value was not configured.
+	// Blend landing points of neighbors as the target
+	var blendedLandX, blendedLandY float64
+	for i, nb := range neighbors {
+		blendedLandX += float64(nb.labels[0]) * weights[i]
+		blendedLandY += float64(nb.labels[1]) * weights[i]
+	}
+	if totalWeight > 0 {
+		blendedLandX /= totalWeight
+		blendedLandY /= totalWeight
+	} else {
+		blendedLandX = float64(initial[0])
+		blendedLandY = float64(initial[1])
+	}
+
+	// Simulation-level tuning constants
 	forceEps := m.ForceEps
 	if forceEps == 0 {
 		forceEps = 1e-3
@@ -442,10 +452,6 @@ func (m *Monte) Simulate(globalIdx int, initial []float32, numSims, steps int) (
 	if maxPerPlayer == 0 {
 		maxPerPlayer = 10.0
 	}
-	landingNudgeFactor := m.LandingNudgeFactor
-	if landingNudgeFactor == 0 {
-		landingNudgeFactor = 0.02
-	}
 	roleTargetedWeight := m.RoleTargetedWeight
 	if roleTargetedWeight == 0 {
 		roleTargetedWeight = 2.0
@@ -455,16 +461,14 @@ func (m *Monte) Simulate(globalIdx int, initial []float32, numSims, steps int) (
 		rolePasserWeight = 1.1
 	}
 
-	// Parallelized simulation loop.
-	results := make([]SimulationResult, numSims)
+	gravity := -9.8 // m/s^2, downward acceleration
 
-	// Precompute independent seeds using the Monte RNG (serial access).
+	results := make([]SimulationResult, numSims)
 	seeds := make([]int64, numSims)
 	for i := 0; i < numSims; i++ {
 		seeds[i] = m.rng.Int63()
 	}
 
-	// Determine worker count and launch workers.
 	workerCount := runtime.NumCPU()
 	if workerCount > numSims {
 		workerCount = numSims
@@ -477,196 +481,169 @@ func (m *Monte) Simulate(globalIdx int, initial []float32, numSims, steps int) (
 		go func() {
 			defer wg.Done()
 			for sim := range jobs {
-				// Create per-simulation RNG from precomputed seed.
 				rng := rand.New(rand.NewSource(seeds[sim]))
-
-				// 2) Sample neighbor index according to weights (using per-sim RNG)
-				target := rng.Float64() * totalWeight
-				acc := 0.0
-				choice := 0
-				for i, w := range weights {
-					acc += w
-					if target <= acc {
-						choice = i
-						break
-					}
-				}
-				chosen := neighbors[choice]
 
 				// Use the players fetched once earlier for this global example (if any).
 				framePlayers := players
 
-				// 3) create trajectory
-				traj := make([]Point3, steps)
-
+				// Initial position
 				x0 := float64(initial[0])
 				y0 := float64(initial[1])
-				x2 := float64(chosen.labels[0])
-				y2 := float64(chosen.labels[1])
+				z0 := 0.0
 
-				// Estimate peak height using speed feature (initial[2]) and some randomness.
+				// Target (blended landing)
+				xT := blendedLandX
+				yT := blendedLandY
+
+				// Estimate time of flight based on distance and initial speed
 				speed := float64(initial[2])
-				basePeak := clampFloat64(speed*0.5+6.0, 1.5, 40.0) // empirical heuristic
-				peakNoise := (rng.Float64()*2.0 - 1.0) * 1.5       // +/-1.5 units
-				peakHeight := basePeak + peakNoise
+				distXY := math.Hypot(xT-x0, yT-y0)
+				// Add some noise to speed for realism
+				speedNoise := (rng.Float64()*2.0 - 1.0) * 1.5
+				launchSpeed := clampFloat64(speed+speedNoise, 1.0, 60.0)
 
-				// Lateral offset: perpendicular to the straight line between P0 and P2.
-				dx := x2 - x0
-				dy := y2 - y0
-				perpX := -dy
-				perpY := dx
-				perpLen := math.Hypot(perpX, perpY)
-				var ux, uy float64
-				if perpLen > 1e-9 {
-					ux = perpX / perpLen
-					uy = perpY / perpLen
-				} else {
-					ux = 0
-					uy = 0
+				// Choose a reasonable launch angle (e.g., 35-55 degrees), add noise
+				angleDeg := 45.0 + (rng.Float64()*2.0-1.0)*8.0
+				angleRad := angleDeg * math.Pi / 180.0
+
+				// Compute initial velocity components
+				v0 := launchSpeed
+				v0z := v0 * math.Sin(angleRad)
+				v0xy := v0 * math.Cos(angleRad)
+				dir := math.Atan2(yT-y0, xT-x0)
+				v0x := v0xy * math.Cos(dir)
+				v0y := v0xy * math.Sin(dir)
+
+				// Time step (dt) and total time
+				totalTime := (2 * v0z) / -gravity
+				if totalTime <= 0 || math.IsNaN(totalTime) || math.IsInf(totalTime, 0) {
+					totalTime = distXY / (v0 + 1e-6)
 				}
-				// lateral magnitude influenced by orientation feature (initial[4]) and some randomness
-				orient := float64(initial[4])
-				lateralBase := clampFloat64(orient*0.12, -6.0, 6.0)
-				lateralNoise := (rng.Float64()*2.0 - 1.0) * 1.0
-				lateralOffset := lateralBase + lateralNoise
-
-				// Control point (P1) is midpoint offset by perpendicular vector and elevated in Z
-				midX := (x0 + x2) / 2.0
-				midY := (y0 + y2) / 2.0
-				// baseline control point
-				p1x := midX + ux*lateralOffset
-				p1y := midY + uy*lateralOffset
-				p1z := peakHeight
-
-				// Compute net player influence (attractive for offense, repulsive for defense),
-				// with special weighting for player_role (e.g., targeted receivers).
-				forceX := 0.0
-				forceY := 0.0
-				if len(framePlayers) > 0 {
-					for _, fp := range framePlayers {
-						px := float64(fp.X)
-						py := float64(fp.Y)
-						dpx := px - x0
-						dpy := py - y0
-						dist := math.Hypot(dpx, dpy)
-						if dist < forceEps {
-							continue
-						}
-						uxp := dpx / dist
-						uyp := dpy / dist
-
-						// Team sign: offense attracts (+1), defense repels (-defenseWeight)
-						sign := 1.0
-						if strings.EqualFold(fp.Side, "Defense") || strings.EqualFold(fp.Side, "D") {
-							sign = -defenseWeight
-						}
-
-						// Role multiplier: prefer explicit RoleWeights map if provided,
-						// otherwise classify into Defensive Coverage, Targeted Receiver,
-						// Passer, or Other Route Runner with appropriate weights.
-						roleMul := 1.0
-						lrole := strings.ToLower(strings.TrimSpace(fp.Role))
-						if m.RoleWeights != nil && len(m.RoleWeights) > 0 {
-							// scan known keywords in the RoleWeights map (case-insensitive match)
-							found := false
-							for k, v := range m.RoleWeights {
-								kl := strings.ToLower(strings.TrimSpace(k))
-								if kl == "" {
-									continue
-								}
-								if strings.Contains(lrole, kl) {
-									roleMul = v
-									found = true
-									break
-								}
-							}
-							if !found {
-								// leave roleMul as default 1.0
-							}
-						} else {
-							// classify roles into the requested categories:
-							// - Defensive Coverage: repulsive (sign handled below), give slightly larger magnitude
-							// - Targeted Receiver: attractive (strong)
-							// - Passer: moderate influence
-							// - Other Route Runner: offense slight attractive, defense slight repulsive
-							if strings.Contains(lrole, "coverage") || strings.Contains(lrole, "defend") || strings.Contains(lrole, "defense") {
-								// Defensive coverage: strengthen influence so repulsion is noticeable
-								roleMul = 1.3
-							} else if strings.Contains(lrole, "target") || strings.Contains(lrole, "receiver") || strings.Contains(lrole, "targeted") {
-								// Targeted receiver: attractive (use configured targeted weight)
-								roleMul = roleTargetedWeight
-							} else if strings.Contains(lrole, "pass") || strings.Contains(lrole, "quarterback") || strings.Contains(lrole, "qb") {
-								// Passer: moderate role influence
-								roleMul = rolePasserWeight
-							} else {
-								// Other route runner: bias slightly based on team side.
-								// Offense: slightly attractive; Defense: slightly repulsive (sign handled elsewhere).
-								if strings.EqualFold(fp.Side, "Defense") || strings.EqualFold(fp.Side, "D") {
-									roleMul = 1.05
-								} else {
-									roleMul = 1.15
-								}
-							}
-						}
-
-						// Inverse-square falloff
-						w := roleMul * sign * (1.0 / (dist*dist + forceEps))
-						// clamp to avoid extreme contributions
-						if w > maxPerPlayer {
-							w = maxPerPlayer
-						}
-						if w < -maxPerPlayer {
-							w = -maxPerPlayer
-						}
-						forceX += w * uxp
-						forceY += w * uyp
-					}
+				if totalTime < 0.5 {
+					totalTime = 0.5
 				}
+				dt := totalTime / float64(steps-1)
 
-				// Apply force to control point and lightly nudge landing point.
-				p1x = p1x + forceScale*forceX
-				p1y = p1y + forceScale*forceY
-				x2 = x2 + landingNudgeFactor*forceX
-				y2 = y2 + landingNudgeFactor*forceY
+				// State variables
+				x, y, z := x0, y0, z0
+				vx, vy, vz := v0x, v0y, v0z
 
-				// Build quadratic Bézier for x,y,z: B(t) = (1-t)^2 P0 + 2(1-t)t P1 + t^2 P2
+				traj := make([]Point3, steps)
+				landed := false
+
 				for i := 0; i < steps; i++ {
-					var t float64
-					if steps == 1 {
-						t = 0
-					} else {
-						t = float64(i) / float64(steps-1)
+					// Compute net player force at this step
+					forceX := 0.0
+					forceY := 0.0
+					if len(framePlayers) > 0 {
+						for _, fp := range framePlayers {
+							px := float64(fp.X)
+							py := float64(fp.Y)
+							dpx := px - x
+							dpy := py - y
+							dist := math.Hypot(dpx, dpy)
+							if dist < forceEps {
+								continue
+							}
+							uxp := dpx / dist
+							uyp := dpy / dist
+
+							sign := 1.0
+							if strings.EqualFold(fp.Side, "Defense") || strings.EqualFold(fp.Side, "D") {
+								sign = -defenseWeight
+							}
+
+							roleMul := 1.0
+							lrole := strings.ToLower(strings.TrimSpace(fp.Role))
+							if m.RoleWeights != nil && len(m.RoleWeights) > 0 {
+								found := false
+								for k, v := range m.RoleWeights {
+									kl := strings.ToLower(strings.TrimSpace(k))
+									if kl == "" {
+										continue
+									}
+									if strings.Contains(lrole, kl) {
+										roleMul = v
+										found = true
+										break
+									}
+								}
+								if !found {
+								}
+							} else {
+								if strings.Contains(lrole, "coverage") || strings.Contains(lrole, "defend") || strings.Contains(lrole, "defense") {
+									roleMul = 1.3
+								} else if strings.Contains(lrole, "target") || strings.Contains(lrole, "receiver") || strings.Contains(lrole, "targeted") {
+									roleMul = roleTargetedWeight
+								} else if strings.Contains(lrole, "pass") || strings.Contains(lrole, "quarterback") || strings.Contains(lrole, "qb") {
+									roleMul = rolePasserWeight
+								} else {
+									if strings.EqualFold(fp.Side, "Defense") || strings.EqualFold(fp.Side, "D") {
+										roleMul = 1.05
+									} else {
+										roleMul = 1.15
+									}
+								}
+							}
+
+							w := roleMul * sign * (1.0 / (dist*dist + forceEps))
+							if w > maxPerPlayer {
+								w = maxPerPlayer
+							}
+							if w < -maxPerPlayer {
+								w = -maxPerPlayer
+							}
+							forceX += w * uxp
+							forceY += w * uyp
+						}
 					}
-					it := 1.0 - t
-					b0 := it * it
-					b1 := 2.0 * it * t
-					b2 := t * t
 
-					x := b0*x0 + b1*p1x + b2*x2
-					y := b0*y0 + b1*p1y + b2*y2
-					z := b0*0.0 + b1*p1z + b2*0.0
+					// Apply player force as acceleration (scaled)
+					ax := forceScale * forceX
+					ay := forceScale * forceY
+					az := gravity
 
-					// small jitter to avoid overly deterministic paths
-					jitterScale := 0.02 * math.Hypot(x2-x0, y2-y0)
+					// Euler integration for velocity and position
+					vx += ax * dt
+					vy += ay * dt
+					vz += az * dt
+
+					x += vx * dt
+					y += vy * dt
+					z += vz * dt
+
+					// Add small random jitter for realism
+					jitterScale := 0.02 * distXY
 					x += (rng.Float64()*2.0 - 1.0) * jitterScale * 0.5
 					y += (rng.Float64()*2.0 - 1.0) * jitterScale * 0.5
 					z += (rng.Float64()*2.0 - 1.0) * 0.2
 
-					traj[i] = Point3{X: float32(x), Y: float32(y), Z: float32(math.Max(0.0, z))}
+					if z < 0 {
+						z = 0
+						landed = true
+					}
+
+					traj[i] = Point3{X: float32(x), Y: float32(y), Z: float32(z)}
+
+					if landed {
+						// Fill remaining steps with landing point
+						for j := i + 1; j < steps; j++ {
+							traj[j] = Point3{X: float32(x), Y: float32(y), Z: 0}
+						}
+						break
+					}
 				}
 
-				// Store result in the preallocated slot for this simulation index.
 				results[sim] = SimulationResult{
 					Trajectory:  traj,
-					LandX:       float32(x2),
-					LandY:       float32(y2),
-					NeighborIdx: chosen.idx,
+					LandX:       float32(x),
+					LandY:       float32(y),
+					NeighborIdx: -1, // No single neighbor, since we blended
 				}
 			}
 		}()
 	}
 
-	// enqueue jobs and wait for completion
 	for i := 0; i < numSims; i++ {
 		jobs <- i
 	}
@@ -868,4 +845,119 @@ func clampFloat64(v, minVal, maxVal float64) float64 {
 		return maxVal
 	}
 	return v
+}
+
+// --- Automated Parameter Tuning ---
+
+// TuneParameters performs random search to optimize simulation parameters for lowest RMSE on landing points.
+// It prints the best parameter set found and its RMSE, and returns a slice of all tried parameter sets and their RMSE for visualization.
+func (m *Monte) TuneParameters(
+	exampleIndices []int, // indices of examples to use for tuning
+	numSims int,          // number of simulations per example
+	steps int,            // number of steps per simulation
+	numTrials int,        // number of random parameter sets to try
+) []struct {
+	ForceScale    float64
+	DefenseWeight float64
+	MaxPerPlayer  float64
+	RoleTargeted  float64
+	RolePasser    float64
+	RMSE          float64
+} {
+	type Params struct {
+		ForceScale    float64
+		DefenseWeight float64
+		MaxPerPlayer  float64
+		RoleTargeted  float64
+		RolePasser    float64
+	}
+
+	bestRMSE := 1e12
+	var bestParams Params
+	var results []struct {
+		ForceScale    float64
+		DefenseWeight float64
+		MaxPerPlayer  float64
+		RoleTargeted  float64
+		RolePasser    float64
+		RMSE          float64
+	}
+
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	for trial := 0; trial < numTrials; trial++ {
+		// Sample random parameters within reasonable ranges
+		params := Params{
+			ForceScale:    0.5 + rng.Float64()*2.0,    // [0.5, 2.5]
+			DefenseWeight: 0.5 + rng.Float64()*2.0,    // [0.5, 2.5]
+			MaxPerPlayer:  5.0 + rng.Float64()*15.0,   // [5, 20]
+			RoleTargeted:  1.0 + rng.Float64()*3.0,    // [1, 4]
+			RolePasser:    0.5 + rng.Float64()*2.0,    // [0.5, 2.5]
+		}
+
+		// Set parameters
+		m.SetForceScale(params.ForceScale)
+		m.SetDefenseWeight(params.DefenseWeight)
+		m.SetMaxPerPlayer(params.MaxPerPlayer)
+		m.SetRoleTargetedWeight(params.RoleTargeted)
+		m.SetRolePasserWeight(params.RolePasser)
+
+		// Evaluate RMSE over the examples
+		var sumSq float64
+		var count int
+
+		for _, idx := range exampleIndices {
+			inputs, labels, err := m.DS.Example(idx)
+			if err != nil || len(inputs) < 6 || len(labels) < 2 {
+				continue
+			}
+			resultsSim, err := m.Simulate(idx, inputs, numSims, steps)
+			if err != nil || len(resultsSim) == 0 {
+				continue
+			}
+			// Use mean landing point over all sims
+			var meanX, meanY float64
+			for _, r := range resultsSim {
+				meanX += float64(r.LandX)
+				meanY += float64(r.LandY)
+			}
+			meanX /= float64(len(resultsSim))
+			meanY /= float64(len(resultsSim))
+
+			dx := meanX - float64(labels[0])
+			dy := meanY - float64(labels[1])
+			sumSq += dx*dx + dy*dy
+			count++
+		}
+
+		if count == 0 {
+			continue
+		}
+		rmse := math.Sqrt(sumSq / float64(count))
+		results = append(results, struct{
+			ForceScale   float64
+			DefenseWeight float64
+			MaxPerPlayer  float64
+			RoleTargeted  float64
+			RolePasser    float64
+			RMSE          float64
+		}{
+			ForceScale:    params.ForceScale,
+			DefenseWeight: params.DefenseWeight,
+			MaxPerPlayer:  params.MaxPerPlayer,
+			RoleTargeted:  params.RoleTargeted,
+			RolePasser:    params.RolePasser,
+			RMSE:          rmse,
+		})
+		if rmse < bestRMSE {
+			bestRMSE = rmse
+			bestParams = params
+		}
+	}
+
+	fmt.Printf("Best RMSE: %.4f\n", bestRMSE)
+	fmt.Printf("Best Params: ForceScale=%.3f, DefenseWeight=%.3f, MaxPerPlayer=%.3f, RoleTargeted=%.3f, RolePasser=%.3f\n",
+		bestParams.ForceScale, bestParams.DefenseWeight, bestParams.MaxPerPlayer, bestParams.RoleTargeted, bestParams.RolePasser)
+
+	return results
 }
