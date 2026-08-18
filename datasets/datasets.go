@@ -582,6 +582,39 @@ func (ds *PredictionDataset) CurrentGame() *Game {
 	return g
 }
 
+// Games loads all games and returns them in gameOrder (sorted by game_id).
+// This triggers lazy loading of every file pair; for large datasets prefer
+// iterating game-by-game via GameIter instead.
+func (ds *PredictionDataset) Games() []*Game {
+	out := make([]*Game, 0, len(ds.gameOrder))
+	for _, id := range ds.gameOrder {
+		_ = ds.ensureGameLoaded(id)
+		ds.mu.Lock()
+		g := ds.games[id]
+		ds.mu.Unlock()
+		if g != nil {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+// GameIter returns an iterator that yields each *Game in sorted order,
+// loading files lazily. The caller can stop early by returning false.
+func (ds *PredictionDataset) GameIter() func(yield func(*Game) bool) {
+	return func(yield func(*Game) bool) {
+		for _, id := range ds.gameOrder {
+			_ = ds.ensureGameLoaded(id)
+			ds.mu.Lock()
+			g := ds.games[id]
+			ds.mu.Unlock()
+			if g != nil && !yield(g) {
+				return
+			}
+		}
+	}
+}
+
 // Iter implements train.Dataset using iter.Seq2.
 //
 // One train.Batch is yielded per game, loading each file pair on first access.

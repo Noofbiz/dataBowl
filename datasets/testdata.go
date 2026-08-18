@@ -12,14 +12,21 @@ import (
 // TestRow holds the submission ID and pre-built input features for one
 // prediction target from the test set.
 type TestRow struct {
-	ID     string    // value from the "id" column in the template CSV
-	Inputs []float32 // length InputFeatureLen
+	ID         string    // value from the "id" column in the template CSV
+	Inputs     []float32 // length InputFeatureLen (for ML model)
+	Role       string    // PlayerRole at last observed frame
+	OutFrameID int       // which output frame this row predicts (1-based)
+	// Raw kinematic state at the last observed frame — used by the simulator.
+	InitX, InitY     float64
+	InitSpeed        float64
+	InitDir          float64
 }
 
 // testPlayerSnap is the last-seen tracking snapshot for a player in a play.
 type testPlayerSnap struct {
 	x, y, s, a, dir, o float32
 	numFrames           int
+	role                string
 }
 
 // testPlayMeta holds per-play metadata needed to build input features.
@@ -137,7 +144,13 @@ func LoadTestData(testInputPath, templatePath string) ([]TestRow, error) {
 		}
 
 		rows = append(rows, TestRow{
-			ID: id,
+			ID:         id,
+			Role:       snap.role,
+			OutFrameID: outFrameID,
+			InitX:      float64(snap.x),
+			InitY:      float64(snap.y),
+			InitSpeed:  float64(snap.s),
+			InitDir:    float64(snap.dir),
 			Inputs: []float32{
 				snap.x, snap.y, snap.s, snap.a, snap.dir, snap.o,
 				encDir(meta.direction),
@@ -187,6 +200,7 @@ func parseTestInputCSV(path string, games map[string]*testGameData) error {
 	iDir       := col("dir")
 	iO         := col("o")
 	iNumFrames := col("num_frames_output")
+	iRole      := col("player_role")
 
 	for _, ci := range []int{iGameID, iPlayID, iNFLID, iFrameID, iPlayDir, iYardline, iX, iY, iS, iA, iDir, iO, iNumFrames} {
 		if ci < 0 {
@@ -247,6 +261,7 @@ func parseTestInputCSV(path string, games map[string]*testGameData) error {
 				dir:       f32(rec[iDir]),
 				o:         f32(rec[iO]),
 				numFrames: atoi(rec[iNumFrames]),
+				role:      str(iRole, rec),
 			}
 		}
 
