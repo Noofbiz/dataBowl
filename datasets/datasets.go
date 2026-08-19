@@ -39,8 +39,10 @@ type predExample struct {
 	gameID  string
 	playID  string
 	nflID   string
-	frameID int // output frame_id ∈ [1, num_frames_output]
+	frameID  int    // output frame_id ∈ [1, num_frames_output]
+	numFrames int   // total output frames for this play/player
 
+	role   string    // PlayerRole of the player to predict
 	inputs []float32 // length InputFeatureLen
 	labels []float32 // [x, y] from output CSV
 }
@@ -522,10 +524,12 @@ func (ds *PredictionDataset) buildExamplesForFile(inputFile string) {
 				}
 
 				gameExs = append(gameExs, predExample{
-					gameID:  gameID,
-					playID:  playID,
-					nflID:   nflID,
-					frameID: outFrame,
+					gameID:    gameID,
+					playID:    playID,
+					nflID:     nflID,
+					frameID:   outFrame,
+					numFrames: nFrames,
+					role:      lastPlayer.PlayerRole,
 					inputs: []float32{
 						float32(lastPlayer.X),
 						float32(lastPlayer.Y),
@@ -599,6 +603,45 @@ func (ds *PredictionDataset) Games() []*Game {
 	return out
 }
 
+// Subset returns a new *PredictionDataset whose game order is restricted to
+// gameIDs (in the provided order). It shares all underlying loaded data with
+// the receiver, so files already parsed are not re-read.
+//
+// The returned dataset satisfies train.Dataset and can be passed to
+// TrainEpochs, GameIter, etc.
+func (ds *PredictionDataset) Subset(gameIDs []string) *PredictionDataset {
+	// Build a set of the requested IDs that actually exist.
+	known := make(map[string]bool, len(gameIDs))
+	for _, id := range gameIDs {
+		if _, ok := ds.gameToInputFile[id]; ok {
+			known[id] = true
+		}
+	}
+	order := make([]string, 0, len(known))
+	for _, id := range gameIDs {
+		if known[id] {
+			order = append(order, id)
+			known[id] = false // deduplicate
+		}
+	}
+
+	// Shallow-copy the dataset but override gameOrder and the atomic cursor.
+	sub := &PredictionDataset{
+		trainInputPattern:    ds.trainInputPattern,
+		trainOutputPattern:   ds.trainOutputPattern,
+		name:                 ds.name + " (subset)",
+		gameOrder:            order,
+		gameToInputFile:      ds.gameToInputFile,
+		loadedFiles:          ds.loadedFiles,
+		games:                ds.games,
+		gameExamples:         ds.gameExamples,
+		outputPositions:      ds.outputPositions,
+		frameIndexTTL:        ds.frameIndexTTL,
+		frameIndexMaxEntries: ds.frameIndexMaxEntries,
+	}
+	return sub
+}
+
 // GameIter returns an iterator that yields each *Game in sorted order,
 // loading files lazily. The caller can stop early by returning false.
 func (ds *PredictionDataset) GameIter() func(yield func(*Game) bool) {
@@ -613,6 +656,69 @@ func (ds *PredictionDataset) GameIter() func(yield func(*Game) bool) {
 			}
 		}
 	}
+}
+
+// EvalExample is one fully-labelled prediction example for use in evaluation.
+// It contains everything needed to run both the ML model and the Monte Carlo
+// simulator, plus the ground-truth position to score against.
+type EvalExample struct {
+	GameID    string
+	PlayID    string
+	NFLID     string
+	FrameID   int    // 1-based output frame index
+	NumFrames int    // total output frames for this player-play
+	Role      string // PlayerRole at last pre-throw frame
+
+	// Inputs is the same feature vector fed to the ML model
+	// (length InputFeatureLen).
+	Inputs []float32
+
+	// Initial kinematic state — used directly by the Monte Carlo simulator.
+	InitX, InitY   float64
+	InitSpeed      float64 // yards/sec
+	InitDir        float64 // degrees, clockwise from +Y
+
+	// Ground-truth position from the output CSV.
+	TrueX, TrueY float32
+}
+
+// GameExamples loads the game and returns all labelled EvalExamples for it.
+// Returns an error if the game is unknown or its data cannot be loaded.
+func (ds *PredictionDataset) GameExamples(gameID string) ([]EvalExample, error) {
+	if err := ds.ensureGameLoaded(gameID); err != nil {
+		return nil, err
+	}
+	ds.mu.Lock()
+	exs := ds.gameExamples[gameID]
+	ds.mu.Unlock()
+
+	out := make([]EvalExample, len(exs))
+	for i, ex := range exs {
+		out[i] = EvalExample{
+			GameID:    ex.gameID,
+			PlayID:    ex.playID,
+			NFLID:     ex.nflID,
+			FrameID:   ex.frameID,
+			NumFrames: ex.numFrames,
+			Role:      ex.role,
+			Inputs:    ex.inputs,
+			InitX:     float64(ex.inputs[0]),
+			InitY:     float64(ex.inputs[1]),
+			InitSpeed: float64(ex.inputs[2]),
+			InitDir:   float64(ex.inputs[4]),
+			TrueX:     ex.labels[0],
+			TrueY:     ex.labels[1],
+		}
+	}
+	return out, nil
+}
+
+// GameOrder returns the sorted slice of game IDs known to this dataset.
+// Each ID can be passed to GameExamples after EnsureGameLoaded is called.
+func (ds *PredictionDataset) GameOrder() []string {
+	out := make([]string, len(ds.gameOrder))
+	copy(out, ds.gameOrder)
+	return out
 }
 
 // Iter implements train.Dataset using iter.Seq2.

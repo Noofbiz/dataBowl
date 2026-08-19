@@ -14,19 +14,6 @@
 //	-out           output directory               (default: out)
 //	-runs          Monte Carlo runs per row        (default: 200)
 //	-seed          RNG seed for force table        (default: 42)
-//
-// How it works:
-//
-//  1. Index training data (lazy — only game_ids scanned at startup).
-//  2. Stream every training game through GameIter; extract empirical
-//     acceleration distributions into a ForceTable, grouped by
-//     (player_role, speed_bucket, dir_bucket).
-//  3. Load test rows from test_input.csv + submission template.
-//  4. For each test row, run -runs independent particle simulations
-//     starting from the player's last observed kinematic state.
-//  5. Take the mean trajectory and read off the position at output frame N
-//     (frame_id/num_frames_output encodes which future step is requested).
-//  6. Write out/submission.csv with columns id,x,y.
 package main
 
 import (
@@ -43,12 +30,12 @@ import (
 )
 
 func main() {
-	trainInput  := flag.String("train-input",   "datasets/assets/prediction/train/input*.csv", "glob for training input CSVs")
-	testInput   := flag.String("test-input",    "datasets/assets/prediction/test_input.csv",   "test input CSV")
-	testTmpl    := flag.String("test-template", "datasets/assets/prediction/test.csv",         "submission template CSV")
-	outDir      := flag.String("out",           "out",  "output directory")
-	runs        := flag.Int("runs",             200,    "Monte Carlo runs per test row")
-	seed        := flag.Int64("seed",           42,     "RNG seed for the force table")
+	trainInput := flag.String("train-input", "datasets/assets/prediction/train/input*.csv", "glob for training input CSVs")
+	testInput := flag.String("test-input", "datasets/assets/prediction/test_input.csv", "test input CSV")
+	testTmpl := flag.String("test-template", "datasets/assets/prediction/test.csv", "submission template CSV")
+	outDir := flag.String("out", "out", "output directory")
+	runs := flag.Int("runs", 200, "Monte Carlo runs per test row")
+	seed := flag.Int64("seed", 42, "RNG seed for the force table")
 	flag.Parse()
 
 	// ── 1. Index training dataset (no CSVs loaded yet) ─────────────────────
@@ -88,7 +75,7 @@ func main() {
 	// so each cached simulation covers all future frames for that player-play.
 	type simKey struct {
 		x, y, speed, dir float64
-		role              string
+		role             string
 	}
 
 	maxFrames := make(map[simKey]int)

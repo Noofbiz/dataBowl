@@ -39,22 +39,111 @@ plays as well as a flat tensor to use with machine learning models.
 This will allow me to use the dataset for both the montecarlo simulations
 as well as the machine learning of gomlx.
 
-### Analytics Data
-
-TBA
-
 ## Statistical Mechanics
 
+How it works:
 
+  1. Index training data (lazy — only game_ids scanned at startup).
+  2. Stream every training game through GameIter; extract empirical
+     acceleration distributions into a ForceTable, grouped by
+     (player_role, speed_bucket, dir_bucket).
+  3. Load test rows from test_input.csv + submission template.
+  4. For each test row, run -runs independent particle simulations
+     starting from the player's last observed kinematic state.
+  5. Take the mean trajectory and read off the position at output frame N
+     (frame_id/num_frames_output encodes which future step is requested).
+  6. Write out/submission.csv with columns id,x,y.
 
 ## Machine Learning Models
 
+For Machine Learning, I built a Multi-Layer Perception (MLP) model to make
+predictions about where the player is going based on previous frames.
 
+### Architecture
 
-## Front-End
+	Input  [N, InputFeatureLen=9]
+	   │
+	Dense(→hiddenSizes[0]) + ReLU
+	Dense(→hiddenSizes[1]) + ReLU
+	   ⋮
+	Dense(→hiddenSizes[-1]) + ReLU
+	Dense(→2)               (linear output; predicts x and y)
+ Loss:      Mean Squared Error
+ Optimizer: Adam
 
-cmd/compare - A command line tool to compare different models and their
-predictions on the same data. This can be used to see how different models
-perform on the same plays and to compare their predictions. It runs the simple
-model and also the montecarlo simulations and outputs the results to an output
-file for further analysis.
+## Results
+
+To compare the results, I wrote a command to compare the two methods. It
+uses the dataset to train a model using the `ml` package as well as runs a
+montecarlo simulation using the `simulate` package. In order to gauge each
+model's accuracy, I set aside some of the training data for use as 
+test data. I then was able to use that to compare not only each result
+against eachother, but the results against a separately known value.
+
+I ran my comparison command using
+
+```
+$ go run ./cmd/compare/ ... -epochs 10 -infer-batch 256 -runs 100
+```
+
+```
+=== Prediction Accuracy Comparison (Euclidean distance, yards) ===
+
+Method                N       MAE      RMSE     Median
+------                -       ---      ----     ------
+ML (MLP)      [all]   31637   3.7473   4.7710   2.9560
+Monte Carlo   [all]   31637   1.1727   1.9834   0.5900
+
+--- Early frames (1–5) ---
+ML (MLP)      13690   2.8791   3.2652   2.6428
+Monte Carlo   13690   0.2289   0.3334   0.1408
+
+--- Mid frames (6–15) ---
+ML (MLP)      15119   3.2715   3.8331   2.8671
+Monte Carlo   15119   1.5507   1.9963   1.2032
+
+--- Late frames (16+) ---
+ML (MLP)      2828   10.4933   11.1572   10.1764
+Monte Carlo   2828   3.7207    4.7080    3.1274
+
+Winner (by MAE):
+  All     Monte Carlo wins (ΔMAE = 2.5746 yds)
+  Early   Monte Carlo wins (ΔMAE = 2.6502 yds)
+  Mid     Monte Carlo wins (ΔMAE = 1.7208 yds)
+  Late    Monte Carlo wins (ΔMAE = 6.7727 yds)
+```
+
+This shows that using only 10 epochs and a simple machine learning method,
+Monte Carlo makes better predictions.
+
+Let's see what happens when I crank it up to 40 epochs.
+
+```
+=== Prediction Accuracy Comparison (Euclidean distance, yards) ===
+
+Method                N       MAE      RMSE     Median
+------                -       ---      ----     ------
+ML (MLP)      [all]   31637   3.7473   4.7710   2.9560
+Monte Carlo   [all]   31637   1.1727   1.9834   0.5900
+
+--- Early frames (1–5) ---
+ML (MLP)      13690   2.8791   3.2652   2.6428
+Monte Carlo   13690   0.2289   0.3334   0.1408
+
+--- Mid frames (6–15) ---
+ML (MLP)      15119   3.2715   3.8331   2.8671
+Monte Carlo   15119   1.5507   1.9963   1.2032
+
+--- Late frames (16+) ---
+ML (MLP)      2828   10.4933   11.1572   10.1764
+Monte Carlo   2828   3.7207    4.7080    3.1274
+
+Winner (by MAE):
+  All     Monte Carlo wins (ΔMAE = 2.5746 yds)
+  Early   Monte Carlo wins (ΔMAE = 2.6502 yds)
+  Mid     Monte Carlo wins (ΔMAE = 1.7208 yds)
+  Late    Monte Carlo wins (ΔMAE = 6.7727 yds)
+```
+
+This took 20 minutes to calculate and had very little improvement. Monte
+Carlo appears to be winning every metric by a bit.

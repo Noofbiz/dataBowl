@@ -1,5 +1,6 @@
 # a bunch of big, boring csv files
 datasets/assets/
+out/*
 
 # results
 cmd/compare/output/
